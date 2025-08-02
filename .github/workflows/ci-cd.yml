@@ -1,5 +1,5 @@
 # .github/workflows/ci-cd.yml
-# This is the final, correct version that deploys code via S3.
+# Corrected version with the secret name fixed.
 
 name: Build and Deploy Lambdas via S3
 
@@ -25,7 +25,7 @@ jobs:
       uses: aws-actions/configure-aws-credentials@v2
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }} # <-- THIS LINE IS NOW CORRECT
         aws-region: us-east-1 # Make sure this is your correct AWS region
 
     - name: Set up Python environment
