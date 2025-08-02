@@ -1,0 +1,46 @@
+name: Deploy AIOps Lambdas
+
+on:
+  push:
+    branches:
+    - main
+    paths:
+    - 'src/lambda_functions/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1 # Or your chosen region
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Build and Deploy Lambdas
+      run: |
+        for lambda_dir in src/lambda_functions/*; do
+          LAMBDA_NAME=$(basename "$lambda_dir")
+          echo "Processing $LAMBDA_NAME"
+          
+          # Install dependencies
+          pip install -r "$lambda_dir/requirements.txt" -t "$lambda_dir/package"
+          
+          # Package lambda
+          (cd "$lambda_dir/package" && zip -r ../../${LAMBDA_NAME}.zip .)
+          (cd "$lambda_dir" && zip -g ../../${LAMBDA_NAME}.zip app.py)
+          
+          # Deploy to AWS
+          aws lambda update-function-code \
+            --function-name aiops-self-healing-${LAMBDA_NAME} \
+            --zip-file fileb://${LAMBDA_NAME}.zip
+        done
