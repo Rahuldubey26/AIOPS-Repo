@@ -1,11 +1,16 @@
-name: Deploy AIOps Lambdas
+name: Deploy AIOps Lambdas to AWS
 
 on:
+  # This makes the workflow run on pushes to the 'main' branch
   push:
     branches:
     - main
     paths:
     - 'src/lambda_functions/**'
+
+  # This allows you to run the workflow manually from the Actions tab
+  workflow_dispatch:
+
 
 jobs:
   deploy:
@@ -19,28 +24,49 @@ jobs:
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: us-east-1 # Or your chosen region
+        aws-region: us-east-1 # IMPORTANT: Make sure this matches your Terraform region
 
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.9'
 
+    - name: Install Zip
+      run: sudo apt-get install -y zip
+
     - name: Build and Deploy Lambdas
       run: |
-        for lambda_dir in src/lambda_functions/*; do
-          LAMBDA_NAME=$(basename "$lambda_dir")
-          echo "Processing $LAMBDA_NAME"
-          
-          # Install dependencies
-          pip install -r "$lambda_dir/requirements.txt" -t "$lambda_dir/package"
-          
-          # Package lambda
-          (cd "$lambda_dir/package" && zip -r ../../${LAMBDA_NAME}.zip .)
-          (cd "$lambda_dir" && zip -g ../../${LAMBDA_NAME}.zip app.py)
-          
-          # Deploy to AWS
+        # Navigate into the functions directory
+        cd src/lambda_functions
+
+        # Loop through each individual lambda function directory
+        for lambda_dir in */ ; do
+          # Clean up the name
+          LAMBDA_NAME=${lambda_dir%/}
+          echo "--------------------------------------------------"
+          echo "Processing Lambda function: $LAMBDA_NAME"
+          echo "--------------------------------------------------"
+
+          # Create a temporary directory for packaging
+          mkdir -p package
+
+          # Install dependencies into the package directory if requirements.txt exists
+          if [ -f "$LAMBDA_NAME/requirements.txt" ]; then
+            pip install -r "$LAMBDA_NAME/requirements.txt" -t "package/"
+          fi
+
+          # Copy the function's own code into the package directory
+          cp "$LAMBDA_NAME/app.py" "package/"
+
+          # Create the zip file from the contents of the package directory
+          (cd package && zip -r ../${LAMBDA_NAME}.zip .)
+
+          # Deploy the zip file to AWS Lambda
           aws lambda update-function-code \
-            --function-name aiops-self-healing-${LAMBDA_NAME} \
+            --function-name aiops-self-healing-${LAMBDA_NAME//_/-} \
             --zip-file fileb://${LAMBDA_NAME}.zip
+          
+          # Clean up the temporary directories and zip file
+          rm -rf package
+          rm ${LAMBDA_NAME}.zip
         done
