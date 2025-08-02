@@ -207,9 +207,10 @@ resource "aws_lambda_function" "anomaly_detector" {
   handler       = "app.handler"
   runtime       = "python3.9"
   timeout       = 30
-  layers        = [aws_lambda_layer_version.ml_libraries_layer.arn]
+  
+  # Use the pre-compiled public layer ARN directly
+  layers = ["arn:aws:lambda:us-east-1:770693421928:layer:Klayers-p39-scikit-learn:1"]
 
-  # Point to the S3 object for the function's code
   s3_bucket = aws_s3_bucket.ml_artifacts.id
   s3_key    = "lambda-functions/anomaly_detection.zip"
 
@@ -219,10 +220,6 @@ resource "aws_lambda_function" "anomaly_detector" {
       MODEL_KEY = "models/isolation_forest_model.pkl"
     }
   }
-  # This dependency ensures the layer is created before this function
-  depends_on = [
-    aws_lambda_layer_version.ml_libraries_layer
-  ]
 }
 
 resource "aws_lambda_function" "log_analyzer" {

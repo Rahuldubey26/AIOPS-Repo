@@ -1,7 +1,7 @@
 # .github/workflows/ci-cd.yml
-# FINAL AGGRESSIVE PRUNING VERSION
+# FINAL VERSION - Uses a public layer, so we only build and deploy function code.
 
-name: Build and Deploy Lambdas via S3
+name: Deploy Lambda Functions via S3
 
 on:
   push:
@@ -11,7 +11,7 @@ on:
 
 
 jobs:
-  build-and-deploy:
+  build-and-deploy-functions:
     runs-on: ubuntu-latest
 
     steps:
@@ -33,34 +33,6 @@ jobs:
     - name: Install Zip utility
       run: sudo apt-get install -y zip
 
-    - name: Build, Aggressively Prune, and Upload Lambda Layer
-      run: |
-        echo "--- Building Lambda Layer ---"
-        mkdir -p build/python
-        pip install -r src/lambda_layer/requirements.txt -t build/python
-
-        # --- AGGRESSIVE PRUNING SCRIPT ---
-        echo "--- Pruning libraries to reduce size ---"
-        # Find all directories named __pycache__ and remove them
-        find build/python -type d -name "__pycache__" -exec rm -r {} +
-        # Find all .pyc files and remove them
-        find build/python -type f -name "*.pyc" -delete
-        # Find all info directories (like .dist-info, .egg-info) and remove them
-        find build/python -type d -name "*.dist-info" -exec rm -r {} +
-        find build/python -type d -name "*.egg-info" -exec rm -r {} +
-        # Strip unnecessary symbols from binary files
-        find build/python -name "*.so" -print -exec strip {} \;
-        # Remove test directories which are often large
-        find build/python -type d -name "tests" -exec rm -r {} +
-        find build/python -type d -name "test" -exec rm -r {} +
-
-        cd build
-        zip -r ../ml_libraries_layer.zip .
-        cd ..
-
-        echo "Uploading aggressively pruned layer to S3..."
-        aws s3 cp ml_libraries_layer.zip s3://aiops-self-healing-ml-artifacts-ae5e41cffb13299d/lambda-layers/ml_libraries_layer.zip
-
     - name: Build and Upload Lambda Functions
       run: |
         cd src/lambda_functions
@@ -68,6 +40,7 @@ jobs:
           LAMBDA_NAME=${lambda_dir%/}
           echo "--- Processing Lambda: $LAMBDA_NAME ---"
           
+          # Since anomaly_detection has an empty requirements.txt, this is simple
           mkdir -p package
           cp "$LAMBDA_NAME/app.py" "package/"
           if [ -f "$LAMBDA_NAME/requirements.txt" ] && [ -s "$LAMBDA_NAME/requirements.txt" ]; then
@@ -88,89 +61,3 @@ jobs:
           rm -rf package
           rm ${LAMBDA_NAME}.zip
         done
-
-# # .github/workflows/ci-cd.yml
-# # FINAL VERSION - Includes library pruning to reduce layer size.
-
-# name: Build and Deploy Lambdas via S3
-
-# on:
-#   push:
-#     branches:
-#     - main
-#   workflow_dispatch:
-
-
-# jobs:
-#   build-and-deploy:
-#     runs-on: ubuntu-latest
-
-#     steps:
-#     - name: Checkout code
-#       uses: actions/checkout@v3
-
-#     - name: Configure AWS Credentials
-#       uses: aws-actions/configure-aws-credentials@v2
-#       with:
-#         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-#         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-#         aws-region: us-east-1
-
-#     - name: Set up Python
-#       uses: actions/setup-python@v4
-#       with:
-#         python-version: '3.9'
-
-#     - name: Install Zip utility
-#       run: sudo apt-get install -y zip
-
-#     - name: Build and Upload Lambda Layer
-#       run: |
-#         echo "--- Building Lambda Layer ---"
-#         # Create the required directory structure for layers
-#         mkdir -p build/python
-#         # Install dependencies into the target directory
-#         pip install -r src/lambda_layer/requirements.txt -t build/python
-
-#         # --- NEW PRUNING STEP TO REDUCE SIZE ---
-#         echo "--- Pruning libraries to reduce size ---"
-#         find build/python -type f -name "*.so" | xargs strip
-#         find build/python -type d -name "__pycache__" | xargs rm -rf
-#         find build/pdsython -type d -name "tests" | xargs rm -rf
-#         find build/python -type d -name "*.dist-info" | xargs rm -rf
-
-#         # Zip the pruned contents
-#         cd build
-#         zip -r ../ml_libraries_layer.zip .
-#         cd ..
-
-#         echo "Uploading pruned layer to S3..."
-#         aws s3 cp ml_libraries_layer.zip s3://aiops-self-healing-ml-artifacts-ae5e41cffb13299d/lambda-layers/ml_libraries_layer.zip
-
-#     - name: Build and Upload Lambda Functions
-#       run: |
-#         cd src/lambda_functions
-#         for lambda_dir in */ ; do
-#           LAMBDA_NAME=${lambda_dir%/}
-#           echo "--- Processing Lambda: $LAMBDA_NAME ---"
-
-#           mkdir -p package
-#           if [ -f "$LAMBDA_NAME/requirements.txt" ] && [ -s "$LAMBDA_NAME/requirements.txt" ]; then
-#             pip install -r "$LAMBDA_NAME/requirements.txt" -t "package/"
-#           fi
-#           cp "$LAMBDA_NAME/app.py" "package/"
-#           (cd package && zip -r ../${LAMBDA_NAME}.zip .)
-
-#           echo "Uploading $LAMBDA_NAME function to S3..."
-#           aws s3 cp ${LAMBDA_NAME}.zip s3://aiops-self-healing-ml-artifacts-ae5e41cffb13299d/lambda-functions/${LAMBDA_NAME}.zip
-
-#           # This command will fail on the first run, which is okay
-#           echo "Updating function code for $LAMBDA_NAME..."
-#           aws lambda update-function-code \
-#             --function-name aiops-self-healing-${LAMBDA_NAME//_/-} \
-#             --s3-bucket aiops-self-healing-ml-artifacts-ae5e41cffb13299d \
-#             --s3-key "lambda-functions/${LAMBDA_NAME}.zip" || echo "Function may not exist yet. This is okay on first run."
-
-#           rm -rf package
-#           rm ${LAMBDA_NAME}.zip
-#         done
