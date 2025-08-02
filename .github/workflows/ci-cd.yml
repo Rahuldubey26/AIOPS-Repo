@@ -1,33 +1,25 @@
-# .github/workflows/ci-cd.yml
+# .github/workflows/ci-cd.yml (FINAL-VERSION)
 
-name: Deploy AIOps Lambdas to AWS
+name: Build Layer and Deploy Lambdas
 
 on:
-  # This makes the workflow run on every push to the 'main' branch.
   push:
     branches:
     - main
-
-  # This allows you to run the workflow manually from the Actions tab in GitHub.
   workflow_dispatch:
 
 
 jobs:
-  deploy:
+  # JOB 1: Build and publish the Lambda Layer
+  build-and-publish-layer:
     runs-on: ubuntu-latest
-
+    outputs:
+      layer_arn: ${{ steps.publish_layer.outputs.layer_version_arn }}
     steps:
-    - name: Checkout code from repository
+    - name: Checkout code
       uses: actions/checkout@v3
 
-    - name: Configure AWS Credentials
-      uses: aws-actions/configure-aws-credentials@v2
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: us-east-1 # IMPORTANT: Make sure this matches your Terraform region
-
-    - name: Set up Python environment
+    - name: Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.9'
@@ -35,43 +27,90 @@ jobs:
     - name: Install Zip utility
       run: sudo apt-get install -y zip
 
+    - name: Build Layer package
+      run: |
+        # AWS Layers require dependencies to be in a specific folder structure
+        mkdir -p build/python/lib/python3.9/site-packages
+        pip install -r src/lambda_layer/requirements.txt -t build/python/lib/python3.9/site-packages
+        cd build
+        zip -r ../ml_libraries_layer.zip .
+
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+
+    - name: Publish Layer to AWS
+      id: publish_layer
+      run: |
+        # Publish the layer and capture the output ARN
+        LAYER_ARN=$(aws lambda publish-layer-version \
+          --layer-name aiops-self-healing-ml-libraries \
+          --zip-file fileb://ml_libraries_layer.zip \
+          --compatible-runtimes python3.9 \
+          --query 'LayerVersionArn' \
+          --output text)
+        echo "Published Layer ARN: $LAYER_ARN"
+        # Set the output for other jobs to use
+        echo "layer_version_arn=$LAYER_ARN" >> $GITHUB_OUTPUT
+
+  # JOB 2: Deploy all the Lambda functions
+  deploy-lambda-functions:
+    runs-on: ubuntu-latest
+    # This job will only start AFTER the layer job has finished successfully
+    needs: build-and-publish-layer
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+        aws-region: us-east-1
+
+    - name: Install Zip utility
+      run: sudo apt-get install -y zip
+
     - name: Build and Deploy each Lambda function
       run: |
-        # Navigate into the directory containing all the lambda function folders
         cd src/lambda_functions
-
-        # Loop through each individual lambda function directory (e.g., "anomaly_detection", "log_analyzer")
         for lambda_dir in */ ; do
-          # Remove the trailing slash to get a clean name (e.g., "anomaly_detection")
           LAMBDA_NAME=${lambda_dir%/}
           echo "--------------------------------------------------"
           echo "Processing Lambda function: $LAMBDA_NAME"
           echo "--------------------------------------------------"
-
-          # Create a temporary directory for packaging to keep things clean
+          
           mkdir -p package
-
-          # If a requirements.txt file exists, install dependencies into the package directory
-          if [ -f "$LAMBDA_NAME/requirements.txt" ]; then
-            echo "Installing dependencies from requirements.txt..."
+          # The requirements file for anomaly_detection is now empty, so this will be fast
+          if [ -f "$LAMBDA_NAME/requirements.txt" ] && [ -s "$LAMBDA_NAME/requirements.txt" ]; then
             pip install -r "$LAMBDA_NAME/requirements.txt" -t "package/"
           fi
-
-          # Copy the function's own code (app.py) into the package directory
           cp "$LAMBDA_NAME/app.py" "package/"
-
-          # Go into the package directory and create a zip file of its contents
           (cd package && zip -r ../${LAMBDA_NAME}.zip .)
 
-          # Use the AWS CLI to deploy the newly created zip file to the correct Lambda function.
-          # This replaces underscores in the folder name with hyphens for the AWS resource name.
-          echo "Deploying ${LAMBDA_NAME}.zip to AWS..."
+          # Associate the function with the new layer version created in the first job
+          # The ARN is passed from the 'build-and-publish-layer' job
+          if [ "$LAMBDA_NAME" == "anomaly_detection" ]; then
+            echo "Attaching ML Layer to anomaly_detection function..."
+            aws lambda update-function-configuration \
+              --function-name aiops-self-healing-anomaly-detector \
+              --layers ${{ needs.build-and-publish-layer.outputs.layer_arn }}
+          fi
+
+          echo "Deploying code for ${LAMBDA_NAME}.zip..."
           aws lambda update-function-code \
             --function-name aiops-self-healing-${LAMBDA_NAME//_/-} \
             --zip-file fileb://${LAMBDA_NAME}.zip
           
-          # Clean up the temporary directories and zip file to prepare for the next loop
           rm -rf package
           rm ${LAMBDA_NAME}.zip
-          echo "Deployment for $LAMBDA_NAME complete."
         done

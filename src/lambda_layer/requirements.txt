@@ -1,0 +1,3 @@
+# src/lambda_layer/requirements.txt
+pandas
+scikit-learn
