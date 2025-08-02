@@ -1,116 +1,93 @@
-# .github/workflows/ci-cd.yml (FINAL-VERSION)
+# .github/workflows/ci-cd.yml
+# This is the final, correct version that deploys code via S3.
 
-name: Build Layer and Deploy Lambdas
+name: Build and Deploy Lambdas via S3
 
 on:
+  # This workflow runs on every push to the 'main' branch
   push:
     branches:
     - main
+
+  # This allows you to run the workflow manually from the Actions tab
   workflow_dispatch:
 
 
 jobs:
-  # JOB 1: Build and publish the Lambda Layer
-  build-and-publish-layer:
+  build-and-deploy:
     runs-on: ubuntu-latest
-    outputs:
-      layer_arn: ${{ steps.publish_layer.outputs.layer_version_arn }}
+
     steps:
-    - name: Checkout code
+    - name: Checkout code from repository
       uses: actions/checkout@v3
-
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.9'
-
-    - name: Install Zip utility
-      run: sudo apt-get install -y zip
-
-    - name: Build Layer package
-      run: |
-        # AWS Layers require dependencies to be in a specific folder structure
-        mkdir -p build/python/lib/python3.9/site-packages
-        pip install -r src/lambda_layer/requirements.txt -t build/python/lib/python3.9/site-packages
-        cd build
-        zip -r ../ml_libraries_layer.zip .
-
-    - name: Configure AWS Credentials
-      uses: aws-actions/configure-aws-credentials@v2
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: us-east-1
-
-    - name: Publish Layer to AWS
-      id: publish_layer
-      run: |
-        # Publish the layer and capture the output ARN
-        LAYER_ARN=$(aws lambda publish-layer-version \
-          --layer-name aiops-self-healing-ml-libraries \
-          --zip-file fileb://ml_libraries_layer.zip \
-          --compatible-runtimes python3.9 \
-          --query 'LayerVersionArn' \
-          --output text)
-        echo "Published Layer ARN: $LAYER_ARN"
-        # Set the output for other jobs to use
-        echo "layer_version_arn=$LAYER_ARN" >> $GITHUB_OUTPUT
-
-  # JOB 2: Deploy all the Lambda functions
-  deploy-lambda-functions:
-    runs-on: ubuntu-latest
-    # This job will only start AFTER the layer job has finished successfully
-    needs: build-and-publish-layer
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
-
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.9'
 
     - name: Configure AWS Credentials
       uses: aws-actions/configure-aws-credentials@v2
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
-        aws-region: us-east-1
+        aws-region: us-east-1 # Make sure this is your correct AWS region
 
-    - name: Install Zip utility
+    - name: Set up Python environment
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install Zip utility (required for packaging)
       run: sudo apt-get install -y zip
 
-    - name: Build and Deploy each Lambda function
+    - name: Build and Upload Lambda Layer to S3
       run: |
+        echo "--- Building Lambda Layer ---"
+        # AWS Layers need dependencies in a specific folder structure
+        mkdir -p build/python
+        pip install -r src/lambda_layer/requirements.txt -t build/python
+
+        # Zip the contents of the 'build' directory
+        cd build
+        zip -r ../ml_libraries_layer.zip .
+        cd ..
+
+        echo "Uploading layer zip to S3..."
+        # This uploads the layer to a specific path in your S3 bucket
+        aws s3 cp ml_libraries_layer.zip s3://aiops-self-healing-ml-artifacts-ae5e41cffb13299d/lambda-layers/ml_libraries_layer.zip
+
+    - name: Build and Upload Lambda Functions to S3, then Update Functions
+      run: |
+        # Navigate into the directory containing all lambda function folders
         cd src/lambda_functions
+
+        # Loop through each function directory (e.g., anomaly_detection)
         for lambda_dir in */ ; do
-          LAMBDA_NAME=${lambda_dir%/}
-          echo "--------------------------------------------------"
-          echo "Processing Lambda function: $LAMBDA_NAME"
-          echo "--------------------------------------------------"
+          LAMBDA_NAME=${lambda_dir%/} # Get the clean directory name
+          echo "--- Processing Lambda: $LAMBDA_NAME ---"
           
+          # Create a temporary package directory
           mkdir -p package
-          # The requirements file for anomaly_detection is now empty, so this will be fast
+          
+          # Install dependencies if a requirements.txt file exists and is not empty
           if [ -f "$LAMBDA_NAME/requirements.txt" ] && [ -s "$LAMBDA_NAME/requirements.txt" ]; then
             pip install -r "$LAMBDA_NAME/requirements.txt" -t "package/"
           fi
+          
+          # Copy the function's code into the package directory
           cp "$LAMBDA_NAME/app.py" "package/"
+          
+          # Zip the contents of the package directory
           (cd package && zip -r ../${LAMBDA_NAME}.zip .)
+          
+          echo "Uploading $LAMBDA_NAME function to S3..."
+          # Upload the function's zip file to a specific path in S3
+          aws s3 cp ${LAMBDA_NAME}.zip s3://aiops-self-healing-ml-artifacts-ae5e41cffb13299d/lambda-functions/${LAMBDA_NAME}.zip
 
-          # Associate the function with the new layer version created in the first job
-          # The ARN is passed from the 'build-and-publish-layer' job
-          if [ "$LAMBDA_NAME" == "anomaly_detection" ]; then
-            echo "Attaching ML Layer to anomaly_detection function..."
-            aws lambda update-function-configuration \
-              --function-name aiops-self-healing-anomaly-detector \
-              --layers ${{ needs.build-and-publish-layer.outputs.layer_arn }}
-          fi
-
-          echo "Deploying code for ${LAMBDA_NAME}.zip..."
+          # This command tells AWS Lambda to deploy the new code from S3
+          echo "Updating Lambda function code for $LAMBDA_NAME from S3..."
           aws lambda update-function-code \
             --function-name aiops-self-healing-${LAMBDA_NAME//_/-} \
-            --zip-file fileb://${LAMBDA_NAME}.zip
+            --s3-bucket aiops-self-healing-ml-artifacts-ae5e41cffb13299d \
+            --s3-key "lambda-functions/${LAMBDA_NAME}.zip"
           
+          # Clean up temporary files for the next loop
           rm -rf package
           rm ${LAMBDA_NAME}.zip
         done

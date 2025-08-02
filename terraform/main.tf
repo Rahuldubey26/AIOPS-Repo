@@ -1,31 +1,23 @@
-#### **`terraform/main.tf`**
-
 provider "aws" {
   region = var.aws_region
 }
 
 # --- Networking ---
 resource "aws_vpc" "main" {
-  cidr_block = var.vpc_cidr
-  tags = {
-    Name = "${var.project_name}-vpc"
-  }
+  cidr_block = "10.0.0.0/16"
+  tags       = { Name = "${var.project_name}-vpc" }
 }
 
 resource "aws_subnet" "public" {
   vpc_id                  = aws_vpc.main.id
-  cidr_block              = var.public_subnet_cidr
+  cidr_block              = "10.0.1.0/24"
   map_public_ip_on_launch = true
-  tags = {
-    Name = "${var.project_name}-public-subnet"
-  }
+  tags                    = { Name = "${var.project_name}-public-subnet" }
 }
 
 resource "aws_internet_gateway" "gw" {
   vpc_id = aws_vpc.main.id
-  tags = {
-    Name = "${var.project_name}-igw"
-  }
+  tags   = { Name = "${var.project_name}-igw" }
 }
 
 resource "aws_route_table" "public" {
@@ -34,9 +26,7 @@ resource "aws_route_table" "public" {
     cidr_block = "0.0.0.0/0"
     gateway_id = aws_internet_gateway.gw.id
   }
-  tags = {
-    Name = "${var.project_name}-public-rt"
-  }
+  tags = { Name = "${var.project_name}-public-rt" }
 }
 
 resource "aws_route_table_association" "public" {
@@ -56,14 +46,12 @@ resource "aws_security_group" "ec2_sg" {
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"] # WARNING: Open to the world. Restrict to your IP in production.
   }
-
   ingress {
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
-
   egress {
     from_port   = 0
     to_port     = 0
@@ -106,11 +94,11 @@ data "aws_ami" "amazon_linux_2" {
 }
 
 resource "aws_instance" "app_server" {
-  ami           = data.aws_ami.amazon_linux_2.id
-  instance_type = var.instance_type
-  subnet_id     = aws_subnet.public.id
+  ami                    = data.aws_ami.amazon_linux_2.id
+  instance_type          = "t2.micro" # Using a default, you can use var.instance_type
+  subnet_id              = aws_subnet.public.id
   vpc_security_group_ids = [aws_security_group.ec2_sg.id]
-  iam_instance_profile = aws_iam_instance_profile.ec2_profile.name
+  iam_instance_profile   = aws_iam_instance_profile.ec2_profile.name
 
   user_data = <<-EOF
               #!/bin/bash
@@ -119,13 +107,6 @@ resource "aws_instance" "app_server" {
               systemctl start httpd
               systemctl enable httpd
               echo "<h1>Hello from AIOps Demo Server</h1>" > /var/www/html/index.html
-              
-              # Simple log generator
-              yum install -y ruby
-              wget https://s3.amazonaws.com/aws-cloudwatch/downloads/latest/awslogs-agent-setup.py
-              chmod +x ./awslogs-agent-setup.py
-              # Note: The CloudWatch agent will be configured to send logs to the group created below
-              # In a real scenario, you would automate the agent configuration as well.
               EOF
 
   tags = {
@@ -133,13 +114,9 @@ resource "aws_instance" "app_server" {
   }
 }
 
-# --- S3 Bucket for ML Models ---
+# --- S3 Bucket for ML Models & Lambda Code ---
 resource "aws_s3_bucket" "ml_artifacts" {
   bucket = "${var.project_name}-ml-artifacts-${random_id.bucket_suffix.hex}"
-  acl    = "private"
-  versioning {
-    enabled = true
-  }
 }
 
 resource "random_id" "bucket_suffix" {
@@ -148,7 +125,7 @@ resource "random_id" "bucket_suffix" {
 
 # --- CloudWatch Log Group for the App ---
 resource "aws_cloudwatch_log_group" "app_logs" {
-  name = "/${var.project_name}/app"
+  name              = "/${var.project_name}/app"
   retention_in_days = 7
 }
 
@@ -156,7 +133,7 @@ resource "aws_cloudwatch_log_group" "app_logs" {
 resource "aws_iam_role" "lambda_exec_role" {
   name = "${var.project_name}-lambda-exec-role"
   assume_role_policy = jsonencode({
-    Version = "2012-10-17",
+    Version   = "2012-10-17",
     Statement = [{
       Action    = "sts:AssumeRole",
       Effect    = "Allow",
@@ -166,16 +143,12 @@ resource "aws_iam_role" "lambda_exec_role" {
 }
 
 resource "aws_iam_policy" "lambda_policy" {
-  name = "${var.project_name}-lambda-policy"
+  name   = "${var.project_name}-lambda-policy"
   policy = jsonencode({
-    Version = "2012-10-17",
+    Version   = "2012-10-17",
     Statement = [
       {
-        Action = [
-          "logs:CreateLogGroup",
-          "logs:CreateLogStream",
-          "logs:PutLogEvents"
-        ],
+        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
         Effect   = "Allow",
         Resource = "arn:aws:logs:*:*:*"
       },
@@ -185,10 +158,7 @@ resource "aws_iam_policy" "lambda_policy" {
         Resource = "${aws_s3_bucket.ml_artifacts.arn}/*"
       },
       {
-        Action = [
-          "logs:StartQuery",
-          "logs:GetQueryResults"
-        ],
+        Action   = ["logs:StartQuery", "logs:GetQueryResults"],
         Effect   = "Allow",
         Resource = "*" # Restrict in production
       },
@@ -209,20 +179,6 @@ resource "aws_iam_policy" "lambda_policy" {
   })
 }
 
-# terraform/main.tf (ADD THIS NEW RESOURCE)
-
-resource "aws_lambda_layer_version" "ml_libraries_layer" {
-  # The zip file will be created and uploaded by our CI/CD pipeline
-  filename   = "../src/lambda_layer/ml_libraries_layer.zip" 
-  layer_name = "${var.project_name}-ml-libraries"
-
-  # The libraries will be available for Python 3.9 runtimes
-  compatible_runtimes = ["python3.9"]
-
-  # Keep a reference to the source code hash to update the layer when the zip changes
-  source_code_hash = filebase64sha256("../src/lambda_layer/ml_libraries_layer.zip")
-}
-
 resource "aws_iam_role_policy_attachment" "lambda_attach" {
   role       = aws_iam_role.lambda_exec_role.name
   policy_arn = aws_iam_policy.lambda_policy.arn
@@ -233,27 +189,37 @@ resource "aws_sns_topic" "notifications" {
   name = "${var.project_name}-notifications"
 }
 
-# --- Placeholder for Lambda functions (will be deployed via CI/CD) ---
-# We still define them here so Terraform is aware of them.
+# --- Lambda Layer Resource (Points to S3) ---
+resource "aws_lambda_layer_version" "ml_libraries_layer" {
+  layer_name          = "${var.project_name}-ml-libraries"
+  compatible_runtimes = ["python3.9"]
 
+  # Terraform will expect the code to be at this S3 location.
+  # The CI/CD pipeline is responsible for putting it there.
+  s3_bucket = aws_s3_bucket.ml_artifacts.id
+  s3_key    = "lambda-layers/ml_libraries_layer.zip"
+}
+
+# --- Lambda Function Definitions (All Point to S3) ---
 resource "aws_lambda_function" "anomaly_detector" {
   function_name = "${var.project_name}-anomaly-detector"
   role          = aws_iam_role.lambda_exec_role.arn
   handler       = "app.handler"
   runtime       = "python3.9"
   timeout       = 30
-  
-  filename = "../src/lambda_functions/anomaly_detection_placeholder.zip" # Placeholder
-  source_code_hash = filebase64sha256("../src/lambda_functions/anomaly_detection_placeholder.zip")
+  layers        = [aws_lambda_layer_version.ml_libraries_layer.arn]
 
-  layers = [aws_lambda_layer_version.ml_libraries_layer.arn]
-  
+  # Point to the S3 object for the function's code
+  s3_bucket = aws_s3_bucket.ml_artifacts.id
+  s3_key    = "lambda-functions/anomaly_detection.zip"
+
   environment {
     variables = {
       S3_BUCKET = aws_s3_bucket.ml_artifacts.bucket
       MODEL_KEY = "models/isolation_forest_model.pkl"
     }
   }
+  # This dependency ensures the layer is created before this function
   depends_on = [
     aws_lambda_layer_version.ml_libraries_layer
   ]
@@ -266,9 +232,10 @@ resource "aws_lambda_function" "log_analyzer" {
   runtime       = "python3.9"
   timeout       = 30
 
-  filename = "../src/lambda_functions/log_analyzer_placeholder.zip" # Placeholder
-  source_code_hash = filebase64sha256("../src/lambda_functions/log_analyzer_placeholder.zip")
-  
+  # Point to the S3 object for the function's code
+  s3_bucket = aws_s3_bucket.ml_artifacts.id
+  s3_key    = "lambda-functions/log_analyzer.zip"
+
   environment {
     variables = {
       LOG_GROUP_NAME = aws_cloudwatch_log_group.app_logs.name
@@ -283,13 +250,14 @@ resource "aws_lambda_function" "remediation_handler" {
   runtime       = "python3.9"
   timeout       = 30
 
-  filename = "../src/lambda_functions/remediation_handler_placeholder.zip" # Placeholder
-  source_code_hash = filebase64sha256("../src/lambda_functions/remediation_handler_placeholder.zip")
+  # Point to the S3 object for the function's code
+  s3_bucket = aws_s3_bucket.ml_artifacts.id
+  s3_key    = "lambda-functions/remediation_handler.zip"
 
   environment {
     variables = {
-      INSTANCE_ID     = aws_instance.app_server.id
-      SNS_TOPIC_ARN   = aws_sns_topic.notifications.arn
+      INSTANCE_ID   = aws_instance.app_server.id
+      SNS_TOPIC_ARN = aws_sns_topic.notifications.arn
     }
   }
 }
@@ -300,58 +268,56 @@ resource "aws_sfn_state_machine" "self_healing_workflow" {
   name     = "${var.project_name}-self-healing-workflow"
   role_arn = aws_iam_role.sfn_role.arn
 
-  definition = <<EOF
-{
-  "Comment": "Self-healing workflow for AIOps",
-  "StartAt": "AnalyzeLogs",
-  "States": {
-    "AnalyzeLogs": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::lambda:invoke",
-      "Parameters": {
-        "FunctionName": "${aws_lambda_function.log_analyzer.function_name}:$LATEST",
-        "Payload": {
-          "instance_id.$": "$.detail.instance-id"
+  definition = jsonencode({
+    Comment = "Self-healing workflow for AIOps"
+    StartAt = "AnalyzeLogs"
+    States = {
+      AnalyzeLogs = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::lambda:invoke"
+        Parameters = {
+          "FunctionName" = "${aws_lambda_function.log_analyzer.function_name}:$LATEST"
+          "Payload" = {
+            "instance_id.$" = "$.detail.instance-id"
+          }
         }
-      },
-      "Next": "IsRootCauseFound"
-    },
-    "IsRootCauseFound": {
-      "Type": "Choice",
-      "Choices": [
-        {
-          "Variable": "$.Payload.summary",
-          "StringMatches": "*error*",
-          "Next": "RemediateApplication"
+        Next = "IsRootCauseFound"
+      }
+      IsRootCauseFound = {
+        Type    = "Choice"
+        Choices = [
+          {
+            Variable      = "$.Payload.summary"
+            StringMatches = "*error*"
+            Next          = "RemediateApplication"
+          }
+        ]
+        Default = "NotifyAndStop"
+      }
+      RemediateApplication = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::lambda:invoke"
+        Parameters = {
+          "FunctionName" = "${aws_lambda_function.remediation_handler.function_name}:$LATEST"
+          "Payload" = {
+            action = "restart_service"
+          }
         }
-      ],
-      "Default": "NotifyAndStop"
-    },
-    "RemediateApplication": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::lambda:invoke",
-      "Parameters": {
-        "FunctionName": "${aws_lambda_function.remediation_handler.function_name}:$LATEST",
-        "Payload": {
-          "action": "restart_service"
+        End = true
+      }
+      NotifyAndStop = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::sns:publish"
+        Parameters = {
+          "TopicArn" = aws_sns_topic.notifications.arn
+          "Message" = {
+            "Input.$" = "$"
+          }
         }
-      },
-      "End": true
-    },
-    "NotifyAndStop": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::sns:publish",
-      "Parameters": {
-        "TopicArn": "${aws_sns_topic.notifications.arn}",
-        "Message": {
-          "Input.$": "$"
-        }
-      },
-      "End": true
+        End = true
+      }
     }
-  }
-}
-EOF
+  })
 }
 
 resource "aws_iam_role" "sfn_role" {
@@ -370,20 +336,21 @@ resource "aws_iam_role_policy" "sfn_policy" {
   name = "${var.project_name}-sfn-policy"
   role = aws_iam_role.sfn_role.id
   policy = jsonencode({
-    Version = "2012-10-17",
+    Version   = "2012-10-17",
     Statement = [
       {
-        Effect   = "Allow",
-        Action   = ["lambda:InvokeFunction"],
+        Effect   = "Allow"
+        Action   = ["lambda:InvokeFunction"]
         Resource = [
           aws_lambda_function.log_analyzer.arn,
-          aws_lambda_function.remediation_handler.arn
+          aws_lambda_function.remediation_handler.arn,
+          # Also need to add the anomaly detector if you plan to call it from Step Functions
         ]
       },
       {
-        Effect   = "Allow",
-        Action   = ["sns:Publish"],
-        Resource = aws_sns_topic.notifications.arn
+        Effect   = "Allow"
+        Action   = ["sns:Publish"]
+        Resource = [aws_sns_topic.notifications.arn]
       }
     ]
   })
@@ -400,7 +367,7 @@ resource "aws_cloudwatch_metric_alarm" "high_cpu_alarm" {
   statistic           = "Average"
   threshold           = "70" # Set a threshold that you can easily trigger for testing
   alarm_description   = "This metric monitors ec2 cpu utilization"
-  
+
   dimensions = {
     InstanceId = aws_instance.app_server.id
   }
