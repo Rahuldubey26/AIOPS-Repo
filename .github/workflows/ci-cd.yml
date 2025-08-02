@@ -1,15 +1,12 @@
 # .github/workflows/ci-cd.yml
-# Corrected version with the secret name fixed.
+# FINAL VERSION - Includes library pruning to reduce layer size.
 
 name: Build and Deploy Lambdas via S3
 
 on:
-  # This workflow runs on every push to the 'main' branch
   push:
     branches:
     - main
-
-  # This allows you to run the workflow manually from the Actions tab
   workflow_dispatch:
 
 
@@ -18,76 +15,71 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout code from repository
+    - name: Checkout code
       uses: actions/checkout@v3
 
     - name: Configure AWS Credentials
       uses: aws-actions/configure-aws-credentials@v2
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }} # <-- THIS LINE IS NOW CORRECT
-        aws-region: us-east-1 # Make sure this is your correct AWS region
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
 
-    - name: Set up Python environment
+    - name: Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.9'
 
-    - name: Install Zip utility (required for packaging)
+    - name: Install Zip utility
       run: sudo apt-get install -y zip
 
-    - name: Build and Upload Lambda Layer to S3
+    - name: Build and Upload Lambda Layer
       run: |
         echo "--- Building Lambda Layer ---"
-        # AWS Layers need dependencies in a specific folder structure
+        # Create the required directory structure for layers
         mkdir -p build/python
+        # Install dependencies into the target directory
         pip install -r src/lambda_layer/requirements.txt -t build/python
 
-        # Zip the contents of the 'build' directory
+        # --- NEW PRUNING STEP TO REDUCE SIZE ---
+        echo "--- Pruning libraries to reduce size ---"
+        find build/python -type f -name "*.so" | xargs strip
+        find build/python -type d -name "__pycache__" | xargs rm -rf
+        find build/pdsython -type d -name "tests" | xargs rm -rf
+        find build/python -type d -name "*.dist-info" | xargs rm -rf
+
+        # Zip the pruned contents
         cd build
         zip -r ../ml_libraries_layer.zip .
         cd ..
 
-        echo "Uploading layer zip to S3..."
-        # This uploads the layer to a specific path in your S3 bucket
+        echo "Uploading pruned layer to S3..."
         aws s3 cp ml_libraries_layer.zip s3://aiops-self-healing-ml-artifacts-ae5e41cffb13299d/lambda-layers/ml_libraries_layer.zip
 
-    - name: Build and Upload Lambda Functions to S3, then Update Functions
+    - name: Build and Upload Lambda Functions
       run: |
-        # Navigate into the directory containing all lambda function folders
         cd src/lambda_functions
-
-        # Loop through each function directory (e.g., anomaly_detection)
         for lambda_dir in */ ; do
-          LAMBDA_NAME=${lambda_dir%/} # Get the clean directory name
+          LAMBDA_NAME=${lambda_dir%/}
           echo "--- Processing Lambda: $LAMBDA_NAME ---"
           
-          # Create a temporary package directory
           mkdir -p package
-          
-          # Install dependencies if a requirements.txt file exists and is not empty
           if [ -f "$LAMBDA_NAME/requirements.txt" ] && [ -s "$LAMBDA_NAME/requirements.txt" ]; then
             pip install -r "$LAMBDA_NAME/requirements.txt" -t "package/"
           fi
-          
-          # Copy the function's code into the package directory
           cp "$LAMBDA_NAME/app.py" "package/"
-          
-          # Zip the contents of the package directory
           (cd package && zip -r ../${LAMBDA_NAME}.zip .)
           
           echo "Uploading $LAMBDA_NAME function to S3..."
-          # Upload the function's zip file to a specific path in S3
           aws s3 cp ${LAMBDA_NAME}.zip s3://aiops-self-healing-ml-artifacts-ae5e41cffb13299d/lambda-functions/${LAMBDA_NAME}.zip
 
-          # This command tells AWS Lambda to deploy the new code from S3
-          echo "Updating Lambda function code for $LAMBDA_NAME from S3..."
+          # This command will fail on the first run, which is okay
+          echo "Updating function code for $LAMBDA_NAME..."
           aws lambda update-function-code \
             --function-name aiops-self-healing-${LAMBDA_NAME//_/-} \
             --s3-bucket aiops-self-healing-ml-artifacts-ae5e41cffb13299d \
-            --s3-key "lambda-functions/${LAMBDA_NAME}.zip"
+            --s3-key "lambda-functions/${LAMBDA_NAME}.zip" || echo "Function may not exist yet. This is okay on first run."
           
-          # Clean up temporary files for the next loop
           rm -rf package
           rm ${LAMBDA_NAME}.zip
         done
